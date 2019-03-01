@@ -21,7 +21,6 @@ func resourceAwsSpotFleetRequest() *schema.Resource {
 		Create: resourceAwsSpotFleetRequestCreate,
 		Read:   resourceAwsSpotFleetRequestRead,
 		Delete: resourceAwsSpotFleetRequestDelete,
-		Update: resourceAwsSpotFleetRequestUpdate,
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(10 * time.Minute),
@@ -47,7 +46,7 @@ func resourceAwsSpotFleetRequest() *schema.Resource {
 			"wait_for_fulfillment": {
 				Type:     schema.TypeBool,
 				Optional: true,
-				ForceNew: false,
+				ForceNew: true,
 				Default:  false,
 			},
 			// http://docs.aws.amazon.com/sdk-for-go/api/service/ec2.html#type-SpotFleetLaunchSpecification
@@ -223,6 +222,7 @@ func resourceAwsSpotFleetRequest() *schema.Resource {
 						"monitoring": {
 							Type:     schema.TypeBool,
 							Optional: true,
+							ForceNew: true,
 							Default:  false,
 						},
 						"placement_group": {
@@ -280,11 +280,10 @@ func resourceAwsSpotFleetRequest() *schema.Resource {
 				},
 				Set: hashLaunchSpecification,
 			},
-			// Everything on a spot fleet is ForceNew except target_capacity
 			"target_capacity": {
 				Type:     schema.TypeInt,
 				Required: true,
-				ForceNew: false,
+				ForceNew: true,
 			},
 			"allocation_strategy": {
 				Type:     schema.TypeString,
@@ -302,7 +301,7 @@ func resourceAwsSpotFleetRequest() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 				Default:  "Default",
-				ForceNew: false,
+				ForceNew: true,
 			},
 			"instance_interruption_behaviour": {
 				Type:     schema.TypeString,
@@ -1140,32 +1139,6 @@ func rootBlockDeviceToSet(
 	return set
 }
 
-func resourceAwsSpotFleetRequestUpdate(d *schema.ResourceData, meta interface{}) error {
-	// http://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifySpotFleetRequest.html
-	conn := meta.(*AWSClient).ec2conn
-
-	d.Partial(true)
-
-	req := &ec2.ModifySpotFleetRequestInput{
-		SpotFleetRequestId: aws.String(d.Id()),
-	}
-
-	if val, ok := d.GetOk("target_capacity"); ok {
-		req.TargetCapacity = aws.Int64(int64(val.(int)))
-	}
-
-	if val, ok := d.GetOk("excess_capacity_termination_policy"); ok {
-		req.ExcessCapacityTerminationPolicy = aws.String(val.(string))
-	}
-
-	resp, err := conn.ModifySpotFleetRequest(req)
-	if err == nil && aws.BoolValue(resp.Return) {
-		// TODO: rollback to old values?
-	}
-
-	return nil
-}
-
 func resourceAwsSpotFleetRequestDelete(d *schema.ResourceData, meta interface{}) error {
 	// http://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CancelSpotFleetRequests.html
 	conn := meta.(*AWSClient).ec2conn
@@ -1202,15 +1175,13 @@ func deleteSpotFleetRequest(spotFleetRequestID string, terminateInstances bool, 
 			return resource.NonRetryableError(err)
 		}
 
-		if len(resp.ActiveInstances) == 0 {
-			log.Printf("[DEBUG] Active instance count is 0 for Spot Fleet Request (%s), removing", spotFleetRequestID)
-			return nil
+		if n := len(resp.ActiveInstances); n > 0 {
+			log.Printf("[DEBUG] Active instance count in Spot Fleet Request (%s): %d", spotFleetRequestID, n)
+			return resource.RetryableError(fmt.Errorf("fleet still has (%d) running instances", n))
 		}
 
-		log.Printf("[DEBUG] Active instance count in Spot Fleet Request (%s): %d", spotFleetRequestID, len(resp.ActiveInstances))
-
-		return resource.RetryableError(
-			fmt.Errorf("fleet still has (%d) running instances", len(resp.ActiveInstances)))
+		log.Printf("[DEBUG] Active instance count is 0 for Spot Fleet Request (%s), removing", spotFleetRequestID)
+		return nil
 	})
 }
 
